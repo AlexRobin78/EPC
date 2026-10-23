@@ -31,14 +31,25 @@ const Point = ({ liftValue, countA, countB, inputStyle, isTop, activePlayer, isM
   const activeCheckerColor = isPlayerA ? theme?.checkerCols[1] : theme?.checkerCols[0];
   const activeCheckerBorderColor = isPlayerA ? theme?.checkerBorderCols[1] : theme?.checkerBorderCols[0];
 
+  // Where inside the point was it tapped? On a phone React Native gives locationY directly; on the web the
+  // press event is a browser click, which has no locationY, so measure it from the element's bounding box.
+  const tapY = (event) => {
+      const ne = event?.nativeEvent ?? {};
+      if (typeof ne.locationY === 'number' && isFinite(ne.locationY)) return ne.locationY;
+      const el = event?.currentTarget;
+      const clientY = ne.clientY ?? event?.clientY ?? ne.pageY;
+      if (el && typeof el.getBoundingClientRect === 'function' && typeof clientY === 'number') {
+        return clientY - el.getBoundingClientRect().top;
+      }
+      return undefined;
+  };
+
   const handlePress = (event) => {
-      const { locationX, locationY } = event.nativeEvent;
-      console.log(`Press coordinates relative to View: X=${locationX}, Y=${locationY}, target=${event.target}`);
+      const locationY = tapY(event);
+      if (locationY === undefined) return;   // never pass NaN on to the board
       const preLevel = Math.ceil((heightPoint - locationY) / heightChecker);
       const level = isTop ? (6 - preLevel) : preLevel;
-      console.log(typeof locationY, typeof heightChecker, locationY, heightChecker);
-      console.log(`Level: ${(heightPoint - locationY) / heightChecker}`);
-      console.log(liftValue === null ? 'No liftValue function provided' : 'LiftValue function is provided');
+      if (!Number.isFinite(level)) return;
       liftValue(level, activePlayer);
   };
 

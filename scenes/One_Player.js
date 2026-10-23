@@ -80,6 +80,7 @@ export default function One_Player({ navigation, route }) {
   }
 
   const updateArray = (newValue, index, player) => {
+    if (!Number.isFinite(newValue)) return;   // ignore taps that couldn't be placed
     const isPlayerA = player === 'A';
     const currentArray = isPlayerA ? checkersA : checkersB;
     const setArray = isPlayerA ? setcheckersA : setcheckersB;
