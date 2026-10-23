@@ -48,7 +48,7 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true,
-      "baseUrl": "/Interactive-Backgammon-Blunderbase-V3"
+      "baseUrl": "/EPC"
     },
     "extra": {
       "eas": {
