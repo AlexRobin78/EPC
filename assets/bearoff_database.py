@@ -73,8 +73,14 @@ def NNM(board):
     rolls = math.ceil(getCheckerCount(board) / 2)
     trice = 7 * rolls + 1
 
-    if center_of_gravity > 2: return trice + 4 * center_of_gravity - 7
-    elif center_of_gravity > 1.5: return trice + 2 * center_of_gravity - 3
+    penalty = 0
+    if board[0] == 0 and board[1] == 0:
+        penalty += board[-1]*0.05
+    elif board[-3] >= 5 or board[-4] >= 5:
+        penalty += 0.5
+
+    if center_of_gravity > 2: return trice + 4 * center_of_gravity + penalty - 7
+    elif center_of_gravity > 1.5: return trice + 2 * center_of_gravity + penalty - 3
     return trice
 
 # For 5-8 checkers
@@ -85,7 +91,7 @@ def MM8(board):
 
 def getDescription(board):
     checkers, low_checkers = getCheckerCount(board), board[-1] + board[-2]
-    if checkers <= 4: return "few checkers"
+    if checkers < 4 or (checkers == 4 and board[0] + board[1] == 0): return "few checkers"
     if checkers % 2 == 0 and not isGap(board) and checkers * 0.5 < low_checkers: return "rollish"
     if checkers % 2 == 1 and checkers * 0.4 < low_checkers: return "rollish"
     if low_checkers > 4 or (low_checkers == 4 and checkers % 2 == 1): return "low"
@@ -357,32 +363,20 @@ def findMethod(board):
     description = getDescription(board)
     checkers = getCheckerCount(board)
 
+    if isMCGFastimate(board, description):
+            return "MCG"
+
+    if description == "pippish" and getCheckerCount(board) >= 9:
+            return "low checkers"
+
+    if isMM8(board, description):
+            return "MM8"
+
     if checkers <= 4:
         return "few checkers"
 
-    if isFlat_6(board):
-        return "6 flat"
-
-    if isFlat_5(board):
-        return "5 flat"
-
-    if description == "pippish":
-        return "low checkers"
-
-    if isMCGFastimate(board, description):
-        return "MCG"
-
-    if isMM8(board, description):
-        return "MM8"
-
     if isNNM(board, description):
         return "NNM"
-
-    if isCYM(board, description):
-        return "CYM"
-
-    if SSS(board) != -1:
-        return "SSS"
 
     if isCYM(board, description):
         return "CYM"
@@ -405,9 +399,12 @@ def isFlat_5(board):
     return True
 
 def isMM8(board, description):
-    if description == "rollish":
+    numCheckers = getCheckerCount(board)
+    if numCheckers > 9 or board[0] + board[1] == 0:
         return False
-    if board[0] == 0 and board[1] == 0: # scrunched
+    if numCheckers == 4:
+        return getPipCount(board) >= 13
+    if numCheckers < 4:
         return False
     return True
 

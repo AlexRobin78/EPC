@@ -1,9 +1,13 @@
 // Component file for the Backgammon board view. Takes numCheckers and liftToTop as props.
 
-import { useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { GameContext } from '../app/GameContext';
 import { carnivalTheme, themeMap } from '../assets/themes';
+
+// Shares the board's measured size with every Point so triangles, checkers and trays
+// all scale with the board instead of the raw window height.
+const BoardUnitContext = createContext(null);
 
 function boardIDTranslate(x) {
     switch (x) {
@@ -15,7 +19,8 @@ function boardIDTranslate(x) {
 }
 
 const Point = ({ liftValue, countA, countB, inputStyle, isTop, activePlayer, isMulti, theme }) => {
-  const { height } = useWindowDimensions();
+  const windowHeight = useWindowDimensions().height;
+  const height = useContext(BoardUnitContext) ?? windowHeight;
   const heightChecker = height * 0.08;
   const heightPoint = height * 0.384;
   const styles = stylesFunc(height, theme);
@@ -72,7 +77,15 @@ function getPipCount(numCheckers, isPlayerA = true) {
 }
 
 function BackgammonBoard({ checkersA, checkersB, liftToTop, onCallParentFunction, isInteractive }) {
-  const { height } = useWindowDimensions();
+  const { height: windowHeight } = useWindowDimensions();
+  // Size of the area this component is given (measured on layout)
+  const [area, setArea] = useState(null);
+  // `height` is the unit all sizes below were tuned for (board is 0.9 * unit tall and
+  // 1.376x as wide as it is tall). Derive it from the available area so the board and
+  // everything inside it fits on any screen.
+  const height = area
+    ? Math.min(area.height, area.width / (BOARD_ASPECT * BOARD_HEIGHT_FRACTION))
+    : windowHeight;
   const { soloCheckersCopy, setSoloCheckersCopy, pairCheckersCopy, setPairCheckersCopy, selectedTheme } = useContext(GameContext);
   const activeTheme = themeMap && themeMap.has(selectedTheme) 
     ? themeMap.get(selectedTheme) 
@@ -95,7 +108,13 @@ function BackgammonBoard({ checkersA, checkersB, liftToTop, onCallParentFunction
   }, [checkersA, checkersB]);
 
     return (
-        <View style={styles.container}>
+      <BoardUnitContext.Provider value={height}>
+        <View
+          style={styles.container}
+          onLayout={(e) => {
+            const { width: w, height: h } = e.nativeEvent.layout;
+            setArea(prev => (prev && prev.width === w && prev.height === h) ? prev : { width: w, height: h });
+          }}>
             <View style={styles.board}>
                   <View style={styles.NWtray}/>
                   <View style={styles.NEtray}>
@@ -249,10 +268,10 @@ function BackgammonBoard({ checkersA, checkersB, liftToTop, onCallParentFunction
                   }
                   {isMulti && isInteractive && (
                     <TouchableOpacity 
-                      style={[styles.toggleButton, { borderColor: selectedPlayer === 'A' ? activeTheme?.checkerCols[0] : activeTheme?.checkerCols[1] }]}
+                      style={[styles.toggleButton, { borderColor: selectedPlayer === 'A' ? activeTheme?.checkerCols[1] : activeTheme?.checkerCols[0] }]}
                       onPress={() => setSelectedPlayer(prev => prev === 'A' ? 'B' : 'A')}>
-                      <Text style={styles.toggleText}>EDIT</Text>
-                      <View style={[styles.indicator, { backgroundColor: selectedPlayer === 'A' ? activeTheme?.checkerCols[0] : activeTheme?.checkerCols[1] }]} />
+                      <Text style={styles.toggleText} numberOfLines={1} allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.5}>EDIT</Text>
+                      <View style={[styles.indicator, { backgroundColor: selectedPlayer === 'A' ? activeTheme?.checkerCols[1] : activeTheme?.checkerCols[0] }]} />
                     </TouchableOpacity>
                   )}
                   <Text style={styles.pipCount}>
@@ -371,9 +390,13 @@ function BackgammonBoard({ checkersA, checkersB, liftToTop, onCallParentFunction
                 </View>
             </View>
         </View>
+      </BoardUnitContext.Provider>
     )
 }
 
+
+const BOARD_ASPECT = 1.376;
+const BOARD_HEIGHT_FRACTION = 0.9;
 
 const stylesFunc = (height, theme) => StyleSheet.create({
   point : {
@@ -382,11 +405,9 @@ const stylesFunc = (height, theme) => StyleSheet.create({
   },
   container: {
     flex: 1,
-    gap: 100,
     backgroundColor: theme?.backgroundColor,
-    alignItems: 'flex-start',
+    alignItems: 'center',
     justifyContent: 'center',
-    paddingLeft: 50,
   },
   customText: {
     color: 'white',
@@ -406,8 +427,8 @@ const stylesFunc = (height, theme) => StyleSheet.create({
     fontWeight: 'bold'
   },
   board : {
-    height: '90%',
-    aspectRatio: 1.376,
+    height: height * BOARD_HEIGHT_FRACTION,
+    aspectRatio: BOARD_ASPECT,
     backgroundColor: theme?.frameCol,
     flexDirection: 'row',
     justifyContent: 'center',
@@ -433,7 +454,9 @@ const stylesFunc = (height, theme) => StyleSheet.create({
     paddingBottom: 0.01 * height
   },
   toggleButton: {
-    padding: 5,
+    paddingVertical: 5,
+    paddingHorizontal: 2,
+    maxWidth: '100%',
     borderWidth: 2,
     borderRadius: 5,
     alignItems: 'center',
@@ -442,6 +465,8 @@ const stylesFunc = (height, theme) => StyleSheet.create({
   toggleText: {
     color: 'white',
     fontSize: 6,
+    textAlign: 'center',
+    includeFontPadding: false,
   },
   indicator: {
     width: 20,

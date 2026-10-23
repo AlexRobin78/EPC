@@ -7,7 +7,6 @@
     "icon": "./assets/images/icon.png",
     "scheme": "myrace",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.alexrobin78.MyRace",
@@ -27,11 +26,10 @@
       "package": "com.alexrobin78.MyRace"
     },
     "web": {
-      "output": "static",
+      "output": "single",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
-      "expo-router",
       [
         "expo-splash-screen",
         {
@@ -49,10 +47,10 @@
     ],
     "experiments": {
       "typedRoutes": true,
-      "reactCompiler": true
+      "reactCompiler": true,
+      "baseUrl": "/Interactive-Backgammon-Blunderbase-V3"
     },
     "extra": {
-      "router": {},
       "eas": {
         "projectId": "6b54147a-c562-4850-a6d3-28fb236529cc"
       }

@@ -1,123 +1,165 @@
+// Numeric keypad for entering decimal answers (e.g. an EPC like 15.2).
+//
+// Layout:   1  2  3 | 
+//           4  5  6 | ENTER (tall key on the right)
+//           7  8  9 |
+//           .  0  ⌫ |
+//
+// The keypad fills whatever space its parent gives it: the keys stretch to fit, so give
+// it a container with a real height and it will use all of it. Safe-area padding is the
+// screen's job, not the keypad's.
+
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const Keypad = ({ value, setValue, isDisabled, onEnter }) => {
-  const insets = useSafeAreaInsets();
+const MAX_LENGTH = 10;
 
+const DIGIT_ROWS = [
+  ['1', '2', '3'],
+  ['4', '5', '6'],
+  ['7', '8', '9'],
+  ['.', '0', 'backspace'],
+];
+
+const LABELS = { backspace: '⌫' };
+
+export default function Keypad({ value, setValue, isDisabled, onEnter, placeholder = "Enter EPC" }) {
   const handlePress = (key) => {
-    if (isDisabled) return; // Ignore presses when disabled
+    if (isDisabled) return;
+
     if (key === 'backspace') {
       setValue(prev => prev.slice(0, -1));
-    } else if (key === 'enter') {
-      if (onEnter) {
-        onEnter(value);
-        setValue("");
-      }
     } else if (key === '.') {
-      if (!value.includes('.')) setValue(prev => prev + key);
+      // One decimal point only; a leading "." becomes "0."
+      setValue(prev => (prev.includes('.') ? prev : prev === '' ? '0.' : prev + '.'));
     } else {
-      if (value.length < 10) setValue(prev => prev + key); // Character limit
+      setValue(prev => (prev.length < MAX_LENGTH ? prev + key : prev));
     }
   };
 
-  const keys = [
-    ['1', '2', '3'],
-    ['4', '5', '6'],
-    ['7', '8', '9'],
-    ['.', '0', 'backspace'],
-    ['enter']
-  ];
+  const handleEnter = () => {
+    if (isDisabled || !onEnter) return;
+    onEnter(value);
+    setValue("");
+  };
 
   return (
-    <View style={[styles.wrapper, { paddingBottom: insets.bottom }]}>
-      {/* 1. The Display Area (Now with explicit height and background) */}
+    <View style={[styles.wrapper, isDisabled && styles.disabled]}>
       <View style={styles.displayArea}>
-        <Text style={styles.displayText} numberOfLines={1}>
-          {value || ""}
+        <Text
+          style={[styles.displayText, !value && styles.placeholderText]}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+        >
+          {value || placeholder}
         </Text>
       </View>
 
-      {/* 2. The Keypad Area */}
-      <View style={styles.grid}>
-        {keys.map((row, rowIndex) => (
-          <View key={rowIndex} style={styles.row}>
-            {row.map((key) => (
-              <TouchableOpacity
-                key={key}
-                activeOpacity={0.6}
-                style={[styles.key, key === 'enter' && styles.enterKey]}
-                onPress={() => handlePress(key)}
-              >
-                <Text style={[styles.keyText, key === 'enter' && styles.enterText]}>
-                  {key === 'backspace' ? '⌫' : key === 'enter' ? 'ENTER' : key}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        ))}
+      <View style={styles.body}>
+        <View style={styles.digits}>
+          {DIGIT_ROWS.map((row, rowIndex) => (
+            <View key={rowIndex} style={styles.row}>
+              {row.map((key) => (
+                <TouchableOpacity
+                  key={key}
+                  activeOpacity={0.6}
+                  style={styles.key}
+                  onPress={() => handlePress(key)}
+                  accessibilityRole="button"
+                  accessibilityLabel={key === 'backspace' ? 'Backspace' : key === '.' ? 'Decimal point' : key}
+                >
+                  <Text style={styles.keyText}>{LABELS[key] ?? key}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          ))}
+        </View>
+
+        <TouchableOpacity
+          activeOpacity={0.6}
+          style={styles.enterKey}
+          onPress={handleEnter}
+          accessibilityRole="button"
+          accessibilityLabel="Enter"
+        >
+          <Text style={styles.enterText} numberOfLines={1} adjustsFontSizeToFit>ENTER</Text>
+        </TouchableOpacity>
       </View>
     </View>
   );
-};
+}
+
+const GAP = 6;
 
 const styles = StyleSheet.create({
   wrapper: {
-    backgroundColor: '#1C1C1E', // Dark background ensures visibility
-    borderRadius: 20,
-    padding: 15,
+    flex: 1,
     width: '100%',
-    maxWidth: 400, // Keeps it from getting too wide on tablets
+    maxWidth: 480, // keeps it from getting absurdly wide on tablets
     alignSelf: 'center',
+    backgroundColor: '#1C1C1E',
+    borderRadius: 14,
+    padding: GAP + 2,
+    gap: GAP,
+  },
+  disabled: {
+    opacity: 0.4,
   },
   displayArea: {
-    height: 30, 
+    minHeight: 36,
     justifyContent: 'center',
     alignItems: 'flex-end',
-    paddingHorizontal: 20,
+    paddingHorizontal: 14,
     backgroundColor: '#2C2C2E',
-    borderRadius: 12,
-    marginBottom: 15,
-  },
-  displayLabel: {
-    color: '#0A84FF',
-    fontSize: 10,
-    fontWeight: 'bold',
-    marginBottom: 4,
+    borderRadius: 10,
   },
   displayText: {
-    color: '#FFFFFF', // High contrast white text
-    fontSize: 16,
+    color: '#FFFFFF',
+    fontSize: 22,
     fontWeight: '600',
   },
-  grid: {
-    gap: 5, // Modern way to handle spacing
+  placeholderText: {
+    color: '#8E8E93',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  body: {
+    flex: 1,
+    flexDirection: 'row',
+    gap: GAP,
+  },
+  digits: {
+    flex: 3,
+    gap: GAP,
   },
   row: {
+    flex: 1,
     flexDirection: 'row',
-    gap: 8,
-    justifyContent: 'center',
+    gap: GAP,
   },
   key: {
     flex: 1,
-    height: 25, // Fixed height so it doesn't expand
     backgroundColor: '#3A3A3C',
-    borderRadius: 5,
+    borderRadius: 8,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  enterKey: {
-    backgroundColor: 'green',
-    marginTop: 5,
-  },
   keyText: {
     color: '#FFFFFF',
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '500',
   },
+  enterKey: {
+    flex: 1,
+    backgroundColor: 'green',
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+  },
   enterText: {
+    color: '#FFFFFF',
+    fontSize: 15,
     fontWeight: 'bold',
     letterSpacing: 1,
-  }
+  },
 });
-
-export default Keypad;

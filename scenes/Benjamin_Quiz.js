@@ -1,686 +1,703 @@
-// Component for the EPC_Quiz screen of the app. Takes navigation as a prop. Still in development.
+// Component for the Benjamin Count quiz screen of the app. Takes route and navigation as props.
+//
+// How it works
+//   - When the screen is focused, a fresh quiz of N cube positions is generated up front.
+//     Each position is a top race and a bottom race (bottom player on roll, cube centred, money
+//     game); the correct answer comes from the GNU Backgammon cube engine: Double/Take,
+//     Double/Pass or No Double (roll).
+//   - The user answers with two taps ("Double" then "Take"/"Pass", or just "Roll"). After
+//     the last answer we go to the results screen.
+//   - Tapping a finished position in the results strip "goes back" to it: the board shows that
+//     position and a review panel shows the methods, variance, the user's answer and the correct
+//     one. The timer is paused while reviewing. Press Resume to continue.
+//
+// Layout (landscape):
+//   [ button rail ] [ board ] [ info strip / results strip / decision buttons (or review panel) ]
 
 import { useFocusEffect } from '@react-navigation/native';
-import { useCallback, useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GameContext } from '../app/GameContext';
 import positions from '../assets/epc_positions.json';
+import { cubeDecision } from '../assets/gnubgRace';
+import { getAllowedKeys } from '../assets/quizFilters';
 import { carnivalTheme, themeMap } from '../assets/themes';
 import BackgammonBoard from "../views/BackgammonBoard";
+import FormulaModal, { benjaminSection, explainChecker, FormulaButton } from '../views/FormulaModal';
+
+const DEFAULT_NUM_POSITIONS = 10;
+const MAX_ATTEMPTS_PER_QUESTION = 1000; // safety net so we can never loop forever
+const noop = () => {};
+
+// ---------- quiz logic (pure helpers) ----------
+
+const VARIANCE_SCORES = { rollish: 0, low: 1, medium: 2, high: 3 };
+
+// ----- which positions make good questions -----
+// The answer always comes from the GNU Backgammon engine (see assets/gnubgRace.js). Pairs are only
+// asked if they are a real cube decision: the roller is not hopelessly behind or far ahead, and the
+// right action beats the alternatives by a clear margin (equity), so the quiz never hinges on a coin flip.
+const MIN_WIN = 0.45;            // roller's cubeless winning chance
+const MAX_WIN = 0.92;
+const MIN_EQ_MARGIN = 0.02;      // equity gap between the best action and the next best
+const MAX_SHARE = 0.5;           // no one answer may make up more than this share of a quiz
+const PIP_RATIO_MIN = 0.85;      // cheap pre-filter on top pips / bottom pips before running the engine
+const PIP_RATIO_MAX = 1.5;
+
+const sixPointCounts = (key) => [0, 1, 2, 3, 4, 5].map((i) => parseInt(key[i], 16));  // 6pt .. 1pt
+const pipsOf = (c) => c.reduce((sum, n, i) => sum + n * (6 - i), 0);
+
+// Engine verdict for a pair of races, or null if it isn't a good quiz position.
+function analyse(bottomKey, topKey) {
+  const bottom = sixPointCounts(bottomKey);
+  const top = sixPointCounts(topKey);
+  const ratio = pipsOf(top) / Math.max(1, pipsOf(bottom));
+  if (ratio < PIP_RATIO_MIN || ratio > PIP_RATIO_MAX) return null;
+
+  const r = cubeDecision(bottom, top);
+  if (!r || r.win < MIN_WIN || r.win > MAX_WIN) return null;
+
+  const dbl = Math.min(r.dt, r.dp);                       // what a double is worth against best defence
+  let margin;
+  if (r.short === 'ND') margin = r.nd - dbl;
+  else if (r.short === 'D/T') margin = Math.min(r.dt - r.nd, r.dp - r.dt);
+  else margin = Math.min(r.dp - r.nd, r.dt - r.dp);
+  if (margin < MIN_EQ_MARGIN) return null;
+  return r;
+}
+
+// Builds up to `count` questions from random top/bottom pairs that make a real cube decision
+function buildQuiz(keys, count) {
+  if (keys.length === 0) return [];
+  const questions = [];
+  const tally = { "ND": 0, "D/T": 0, "D/P": 0 };
+  const maxPerAnswer = Math.max(1, Math.ceil(count * MAX_SHARE));
+  for (let attempts = 0; questions.length < count && attempts < count * MAX_ATTEMPTS_PER_QUESTION; attempts++) {
+    const topKey = keys[Math.floor(Math.random() * keys.length)];
+    const bottomKey = keys[Math.floor(Math.random() * keys.length)];
+    const top = positions[topKey];
+    const bottom = positions[bottomKey];
+    if (!top || !bottom) continue;
+    const r = analyse(bottomKey, topKey);
+    if (!r || tally[r.short] >= maxPerAnswer) continue;
+    tally[r.short]++;
+    questions.push({
+      topKey,
+      bottomKey,
+      decision: r.short,
+      tooGood: r.tooGood,
+      nd: r.nd,
+      dt: r.dt,
+      dp: r.dp,
+      win: r.win,
+      topMethod: top.METHOD,
+      bottomMethod: bottom.METHOD,
+      varianceScore: VARIANCE_SCORES[top.VARIANCE] + VARIANCE_SCORES[bottom.VARIANCE],
+    });
+  }
+  return questions;
+}
+
+const isCorrect = (answer, question) => answer === question.decision;
+
+const fmtEq = (v) => (v >= 0 ? '+' : '-') + Math.abs(v).toFixed(3);
+
+// Each key's first six hex digits are the checker counts on six points.
+// Bottom race goes on the A side (points 6..1); top race on the B side (points 19..24).
+function keysToBoards(topKey, bottomKey) {
+  const a = new Array(24).fill(0);
+  const b = new Array(24).fill(0);
+  for (let i = 0; i < 6; i++) {
+    a[5 - i] = parseInt(bottomKey[i], 16);
+    b[i + 18] = parseInt(topKey[i], 16);
+  }
+  return [a, b];
+}
+
+const formatTime = (totalSeconds) => {
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+};
+
+// ---------- screen ----------
 
 export default function Benjamin_Quiz({ route, navigation }) {
-  const { soloCheckersCopy, setSoloCheckersCopy, pairCheckersCopy, setPairCheckersCopy, selectedTheme } = useContext(GameContext);
-  const activeTheme = themeMap && themeMap.has(selectedTheme) 
-    ? themeMap.get(selectedTheme) 
+  const { settings, review } = route.params;
+  // review: opened from the results screen to look back at the finished quiz ({ quiz, answers, time })
+  const numPositions = settings.numPositions ?? DEFAULT_NUM_POSITIONS;
+
+  const { setPairCheckersCopy, selectedTheme } = useContext(GameContext);
+  const activeTheme = themeMap && themeMap.has(selectedTheme)
+    ? themeMap.get(selectedTheme)
     : carnivalTheme;
 
-  const [checkersA, setCheckersA] = useState(
-      [0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0
-      ]
-    );
-  const [checkersB, setCheckersB] = useState(
-      [0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0
-      ]
-    );
+  const { height, width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const styles = stylesFunc(height, width, activeTheme, insets);
 
-  const [quizStats, setQuizStats] = useState([
-  { value: "", color: "white" },
-  { value: "", color: "green" },
-  { value: "", color: "white" },
-  { value: "", color: "green" },
-  { value: "", color: "white" },
-  { value: "", color: "green" },
-  { value: "", color: "white" },
-  { value: "", color: "green" },
-  { value: "", color: "white" },
-  { value: "", color: "green" },
-  ]);
-
-  // Quantify Variance
-  const varianceScoreMap = new Map();
-  varianceScoreMap.set("rollish", 0);
-  varianceScoreMap.set("low", 1);
-  varianceScoreMap.set("medium", 2);
-  varianceScoreMap.set("high", 3);
-
-  const copyPosition = () => {
-    setPairCheckersCopy([checkersA, checkersB]);
-  };
-
-  const updateStatValue = (index, newValue, newColor) => {
-  setQuizStats(prevStats => {
-    // 1. Create a shallow copy of the array
-    const newStats = [...prevStats];
-
-    // 2. Replace the specific object with a updated version
-    newStats[index] = { 
-      ...newStats[index], 
-      value: newValue, 
-      color: newColor 
-    };
-
-    // 3. Return the new array to update state
-    return newStats;
-  });
-};
-
-  const { settings } = route.params;
-  const numPositions = 10;
-  const [quizArray, setQuizArray] = useState([new Array(numPositions).fill(0), new Array(numPositions).fill(0), new Array(numPositions).fill(0)]); // 2D array to store the quiz positions for top and bottom
-  const [answerArray, setAnswerArray] = useState(new Array(numPositions).fill(""));
-
-  const checkSettings = (descr) => {
-    if (descr === "MCG") return settings.isMCG || settings.isFastimate || settings.isAll;
-    if (descr === "Fastimate") return settings.isFastimate || settings.isMCG || settings.isAll;
-    if (descr === "NNM") return settings.isNNM || settings.isAll;
-    if (descr === "CYM") return settings.isCYM || settings.isAll;
-    if (descr === "MM8") return settings.isMM8 || settings.isAll;
-    return false;
-  };
-
-  const { width, height } = useWindowDimensions();
-  const styles = stylesFunc(height, width, activeTheme);
-
-  const [isDouble, setIsDouble] = useState(false);
-  const [myDecision, setMyDecision] = useState("");
-  const [randomTopEntry, setRandomTopEntry] = useState(null);
-  const [randomBottomEntry, setRandomBottomEntry] = useState(null);
-  const [seconds, setSeconds] = useState(0);
-  const [positionCount, setPositionCount] = useState(1);
-  const [trueDecision, setTrueDecision] = useState("");
-
-  const [inaccuracyCount, setInaccuracyCount] = useState(0.0);
-  const [topMethod, setTopMethod] = useState("");
-  const [bottomMethod, setBottomMethod] = useState("");
-  const [estimate, setEstimate] = useState(0.0);
-
+  const [quiz, setQuiz] = useState(review ? review.quiz : null);       // [{ topKey, bottomKey, decision, ... }]
+  const [answers, setAnswers] = useState(review ? review.answers : []);   // "D/T" | "D/P" | "ND", one per answered question
+  const [index, setIndex] = useState(0);        // question currently being answered
+  const [reviewIndex, setReviewIndex] = useState(review ? 0 : null); // question being reviewed, or null
+  const [isDouble, setIsDouble] = useState(false);      // true after tapping "Double"
+  const [seconds, setSeconds] = useState(review ? review.time : 0);
   const [isPaused, setIsPaused] = useState(false);
-  const [isRewinding, setIsRewinding] = useState(false);
-  const [rewindPosition, setRewindPosition] = useState(0);
+  const [formulaOpen, setFormulaOpen] = useState(false);
 
-  useEffect(() => {
-    selectRandomEntry("");
-  }, []);
-/*
-  useEffect(() => {
-    console.log("Value changed to", value);
-    const updatedAnswerArray = [...answerArray];
-    updatedAnswerArray[positionCount - 1] = value;
-    setAnswerArray(updatedAnswerArray);
-    console.log("Updated answer array", updatedAnswerArray);
-  }, [value]); */
+  // Positions allowed by the settings (settings don't change while the screen is open)
+  const keys = useMemo(() => getAllowedKeys(settings), [settings]);
 
-  useEffect(() => {
-    //console.log("tic");
-    // 1. Create the interval when the component mounts
-    const timer = setInterval(() => {
-      //console.log("toc", isPaused, isRewinding, seconds);
-      if (!isPaused && !isRewinding) {
-        setSeconds(prevSeconds => prevSeconds + 1);
-      }
-    }, 1000);
+  // Start a fresh quiz every time the screen is focused
+  const startQuiz = useCallback(() => {
+    if (review) return;   // looking back at a finished quiz: never restart
+    setQuiz(buildQuiz(keys, numPositions));
+    setAnswers([]);
+    setIndex(0);
+    setReviewIndex(null);
+    setIsDouble(false);
+    setSeconds(0);
+    setIsPaused(false);
+  }, [keys, numPositions]);
+  // Coming back from the Setup Position screen must not restart the quiz (no progress is lost): that
+  // visit is flagged in awayRef, and the focus handler skips the restart once. The clock stays stopped
+  // while away.
+  const awayRef = useRef(false);
+  const [away, setAway] = useState(false);
+  useFocusEffect(useCallback(() => {
+    if (awayRef.current) {
+      awayRef.current = false;
+      setAway(false);
+      return;
+    }
+    startQuiz();
+  }, [startQuiz]));
 
-    // 2. IMPORTANT: Clean up the interval when the user leaves the screen
-    // This prevents memory leaks and the timer running in the background.
+  const isReviewing = reviewIndex !== null;
+  const isFinished = !!quiz && answers.length >= quiz.length;
+
+  // Timer: stops while paused, reviewing, or finished
+  useEffect(() => {
+    if (!quiz || isPaused || away || isReviewing || isFinished) return;
+    const timer = setInterval(() => setSeconds(s => s + 1), 1000);
     return () => clearInterval(timer);
-  }, [isPaused, isRewinding]);
+  }, [quiz, isPaused, away, isReviewing, isFinished]);
 
-  useFocusEffect(
-    useCallback(() => {
-      // 1. This code runs when the screen is focused
-      console.log('Screen entered: Resetting variables...');
-      setPositionCount(1);
-      for (let i = 0; i < quizStats.length; i++) {
-        updateStatValue(i, "", "orange");
-      }
-
-      // Return a cleanup function if needed when leaving
-      return () => {
-        console.log('Screen blurred/left');
-      };
-    }, []) // Dependency array for the callback
+  const shownIndex = reviewIndex ?? index;
+  const shown = quiz?.[shownIndex];
+  const [checkersA, checkersB] = useMemo(
+    () => (shown ? keysToBoards(shown.topKey, shown.bottomKey) : [new Array(24).fill(0), new Array(24).fill(0)]),
+    [shown?.topKey, shown?.bottomKey]
   );
 
-  const getTakePoint = (EPC, varianceVal) => {
-    if (EPC === "N/A" || varianceVal === "N/A") {
-      return "N/A";
+  // Formula breakdown for each side: only offered while reviewing a question, so it never gives away an unanswered one
+  const botExplain = useMemo(() => (isReviewing && shown ? explainChecker(checkersA) : null), [isReviewing, shown?.bottomKey]);
+  const topExplain = useMemo(() => (isReviewing && shown ? explainChecker([...checkersB].reverse()) : null), [isReviewing, shown?.topKey]);
+
+  const benjExplain = useMemo(
+    () => (isReviewing && shown ? benjaminSection(positions[shown.bottomKey], positions[shown.topKey], shown.decision)?.explanation ?? null : null),
+    [isReviewing, shown?.topKey, shown?.bottomKey]
+  );
+
+  const submitAnswer = (answer) => {
+    if (!quiz || isReviewing || isPaused || isFinished) return;
+    const nextAnswers = [...answers, answer];
+    setAnswers(nextAnswers);
+    setIsDouble(false);
+
+    if (index + 1 < quiz.length) {
+      setIndex(index + 1);
+      return;
     }
-    return EPC + 0.5 * varianceVal;
-  };
 
-  const isCloseRace = (entryBottom, entryTop) => {
-    // Implementation for checking if two entries are close in race
-    console.log("Comparing entries", entryBottom, entryTop);
-    const estimateBottom = parseFloat(entryBottom.BESTIMATE);
-    const estimateTop = parseFloat(entryTop.BESTIMATE);
-    const varianceVal = varianceScoreMap.get(entryBottom.VARIANCE) + varianceScoreMap.get(entryTop.VARIANCE) - 3;
-    const takePoint = getTakePoint(entryBottom.BESTIMATE, varianceVal);
-    if (estimateBottom - 5 >= takePoint) {
-      return "No";
-    } else if (estimateTop >= takePoint) {
-      return "D/P";
-    } else if (estimateTop + 2.25 >= estimateBottom) {
-      return "D/T";
-    } else if (estimateTop + 3 >= estimateBottom) {
-      return "D/T";
-    } else if (estimateTop + 8 >= estimateBottom) {
-      return "ND";
-    } else {
-      return "No";
-    };
-  };
-
-  const handleButton1Press = () => {
-    console.log("Button 1 pressed. isDouble:", isDouble);
-    if (!isDouble) {
-      setIsDouble(true);
-    } else {
-      setMyDecision("D/T");
-      selectRandomEntry("D/T");
-    }
-  };
-
-  const handleButton2Press = () => {
-    console.log("Button 2 pressed. isDouble:", isDouble);
-    if (isDouble) {
-      setMyDecision("D/P");
-      selectRandomEntry("D/P");
-    } else {
-      setMyDecision("ND");
-      selectRandomEntry("ND");
-    }
-  };
-
-  const formatTime = (totalSeconds) => {
-    const mins = Math.floor(totalSeconds / 60);
-    const secs = totalSeconds % 60;
-    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-  };
-
-  const positionsArray = Object.entries(positions); //
-
-  const filteredArray = positionsArray.filter(([key, position]) => {
-    if (position.METHOD == "NNM" || position.METHOD == "CYM") {
-      return checkSettings(position.METHOD); // not enough data for these methods
-    }
-    return checkSettings(position.METHOD) && position.IS_COMMON_POSITION === "yes";
-  });
-
-  const filteredPositions = Object.fromEntries(filteredArray); //
-  const keys = Object.keys(filteredPositions);
-
-
-  const revisitPosition = (index) => {
-    console.log("positions", index);
-    console.log("answer array", answerArray, "position count", positionCount);
-    setIsRewinding(true);
-    setRewindPosition(index);
-    const [nextKeyTop, nextKeyBottom] = quizArray[index];
-    const answer = quizStats[index].value;
-
-    // Update Board State
-    const updatedCheckersA = [...checkersA];
-    const updatedCheckersB = [...checkersB];
-    for (let i = 0; i < 6; i++) {
-      updatedCheckersA[5-i] = parseInt(nextKeyBottom[i], 16);
-    }
-    for (let i = 0; i < 6; i++) {
-      updatedCheckersB[i+18] = parseInt(nextKeyTop[i], 16);
-    }
-    setCheckersA(updatedCheckersA);
-    setCheckersB(updatedCheckersB);
-  }
-
-  const selectRandomEntry = (myDecision) => {
-  // Use the current index (0-indexed) for all logic in this turn
-  const currentIndex = positionCount - 1;
-  console.log("ARRAYS", answerArray, quizArray, currentIndex, "my decision", myDecision, "true decision", trueDecision);
-
-  // 1. EVALUATE PREVIOUS ANSWER (if not the very first move)
-  if (randomBottomEntry) {
-    const estimateValueBottom = parseFloat(randomBottomEntry.BESTIMATE);
-    const estimateValueTop = parseFloat(randomTopEntry.BESTIMATE);
-    
-    updateStatValue(
-      currentIndex, 
-      (myDecision == trueDecision) ? "" : trueDecision,
-      (myDecision == trueDecision || (myDecision == "D/T" && trueDecision == "ReD/T")) ? "green" : "red"
-    );
-
-    // Update answer array:
-    const updatedAnswerArray = [...answerArray];
-    updatedAnswerArray[currentIndex] = myDecision;
-    setAnswerArray(updatedAnswerArray);
-    console.log("Updated answer array", updatedAnswerArray, "with my decision", myDecision, "and true decision", trueDecision, "current index", currentIndex);
-  }
-
-  // 2. CHECK FINISH CONDITION
-  if (positionCount >= numPositions) {
-    navigation.navigate('EPC_Quiz_Results', { 
+    // Last answer: tally everything and go to the results screen
+    navigation.navigate('Benjamin_Quiz_Results', {
       settings,
-      inaccuracy: inaccuracyCount,
+      inaccuracy: 0, // not used by this quiz: answers are simply right or wrong
       time: seconds,
-      correct: quizStats.filter(stat => stat.color === "green").length,
-      mistake: quizStats.filter(stat => stat.color === "yellow").length,
-      count: numPositions,
+      correct: nextAnswers.filter((a, i) => isCorrect(a, quiz[i])).length,
+      mistake: 0,
+      count: quiz.length,
       mode: "Benjamin Count",
+      review: { quiz, answers: nextAnswers, time: seconds },
     });
-    return; // Stop execution
-  }
+  };
 
-  let nextKeyBottom, nextKeyTop, nextEntryBottom, nextEntryTop;
+  // "Double" -> then "Take"/"Pass".  "Roll" = no double.
+  const onFirstButton = () => (isDouble ? submitAnswer("D/T") : setIsDouble(true));
+  const onSecondButton = () => submitAnswer(isDouble ? "D/P" : "ND");
 
-  // 3. GENERATE NEXT POSITION
-  while (true) {
-    const _nextKeyBottom = keys[Math.floor(Math.random() * keys.length)];
-    const _nextKeyTop = keys[Math.floor(Math.random() * keys.length)];
-    const _nextEntryBottom = filteredPositions[_nextKeyBottom];
-    const _nextEntryTop = filteredPositions[_nextKeyTop];
+  const copyPosition = () => setPairCheckersCopy([checkersA, checkersB]);
 
-    if (isCloseRace(_nextEntryBottom, _nextEntryTop) != "No") {
-      nextKeyBottom = _nextKeyBottom;
-      nextKeyTop = _nextKeyTop;
-      nextEntryBottom = _nextEntryBottom;
-      nextEntryTop = _nextEntryTop;
-      break;
-    }
-  }
-  
-  setRandomTopEntry({ key: nextKeyTop, ...nextEntryTop });
-  setRandomBottomEntry({ key: nextKeyBottom, ...nextEntryBottom });
-  //setMyDecision(""); // Clear my decision for next round
-  setTrueDecision(isCloseRace(nextEntryBottom, nextEntryTop)); // Set the true decision for this position
-  setIsDouble(false); // Reset double state for next round
-  const updatedQuizArray = [...quizArray];
-  if (!randomTopEntry) {
-    updatedQuizArray[0] = [nextKeyTop, nextKeyBottom, isCloseRace(nextEntryBottom, nextEntryTop)];
-  } else {
-    updatedQuizArray[currentIndex+1] = [nextKeyTop, nextKeyBottom, isCloseRace(nextEntryBottom, nextEntryTop)];
-  }
-  setQuizArray(updatedQuizArray);
-  console.log("updated quiz array", updatedQuizArray);
+  // Open the position under review in the Setup Position screen; its Back button returns here
+  const openInSetup = (position) => {
+    awayRef.current = true;
+    setAway(true);
+    navigation.push('Two_Players', { fromQuiz: true, position });
+  };
 
-  // Update Board State
-  const updatedCheckersA = [...checkersA];
-  const updatedCheckersB = [...checkersB];
-  for (let i = 0; i < 6; i++) {
-    updatedCheckersA[5-i] = parseInt(nextKeyBottom[i], 16);
+  // ----- no positions match the chosen settings -----
+  if (quiz && quiz.length === 0) {
+    return (
+      <View style={[styles.screen, styles.emptyScreen]}>
+        <Text style={styles.emptyText}>No positions match these settings.</Text>
+        <TouchableOpacity style={[styles.button, styles.emptyButton]} onPress={() => navigation.goBack()}>
+          <Text style={styles.buttonText}>Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
   }
-  for (let i = 0; i < 6; i++) {
-    updatedCheckersB[i+18] = parseInt(nextKeyTop[i], 16);
-  }
-  setCheckersA(updatedCheckersA);
-  setCheckersB(updatedCheckersB);
+  if (!quiz) return <View style={styles.screen} />;
 
-  // Finally, increment the counter for the UI
-  setPositionCount(prev => prev + 1);
-};
+  const tilesPerRow = quiz.length <= 6 ? quiz.length : Math.ceil(quiz.length / 2);
+  const inputLocked = isPaused || isFinished;
 
   return (
-    <View style={styles.setupPositionStyle}>
-      <View style={styles.backgammonBoardWrapper}>
+    <View style={styles.screen}>
+      {/* Left rail */}
+      <View style={styles.rail}>
+        <TouchableOpacity style={styles.button} onPress={() => navigation.navigate('Home')}
+          accessibilityRole="button" accessibilityLabel="Go to home screen">
+          <Text style={styles.buttonText} numberOfLines={1}>Home</Text>
+        </TouchableOpacity>
+
+        <View style={styles.railGroup}>
+          {review && (
+            <TouchableOpacity style={styles.button} onPress={() => navigation.goBack()}
+              accessibilityRole="button" accessibilityLabel="Back to the results">
+              <Text style={styles.buttonText} numberOfLines={1}>Back</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity style={styles.button} onPress={copyPosition}
+            accessibilityRole="button" accessibilityLabel="Copy this position">
+            <Text style={styles.buttonText} numberOfLines={1}>Copy</Text>
+          </TouchableOpacity>
+          {isReviewing && (botExplain || topExplain || benjExplain) && (
+            <FormulaButton onPress={() => setFormulaOpen(true)} style={styles.button} textStyle={styles.buttonText} />
+          )}
+          {isReviewing && (
+            <TouchableOpacity style={styles.button} onPress={() => openInSetup([checkersA, checkersB])}
+              accessibilityRole="button" accessibilityLabel="Open this position in Setup Position">
+              <Text style={styles.buttonText} numberOfLines={1} adjustsFontSizeToFit>Setup</Text>
+            </TouchableOpacity>
+          )}
+          {!isReviewing && (
+            <TouchableOpacity style={styles.button} onPress={() => setIsPaused(true)}
+              accessibilityRole="button" accessibilityLabel="Pause quiz">
+              <Text style={styles.buttonText} numberOfLines={1}>Pause</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+
+      {/* Board */}
+      <View style={styles.boardArea}>
         <BackgammonBoard
-          liftToTop={(newValue, i) => {}}
+          liftToTop={noop}
           checkersA={checkersA}
           checkersB={checkersB}
-          onCallParentFunction={() => {}}
-          isInteractive={false}/>
+          onCallParentFunction={noop}
+          isInteractive={false}
+        />
       </View>
-      <View style={styles.sidePanel}>
-        <View style={[styles.decisionPanel, isRewinding ? { opacity : 0.0 } : { opacity : 1.0 }]}>
-          <TouchableOpacity style={styles.decisionButton} onPress={() => handleButton1Press()}>
-            <Text style={styles.decisionButtonText}>{ isDouble ? "Take" : "Double" }</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.decisionButton} onPress={() => handleButton2Press()}>
-            <Text style={styles.decisionButtonText}>{ isDouble ? "Pass" : "Roll" }</Text>
-          </TouchableOpacity>
+
+      {/* Right panel */}
+      <View style={styles.panel}>
+        {/* Position number and time */}
+        <View style={styles.infoStrip}>
+          <View style={[styles.chip, styles.chipGray]}>
+            <Text style={styles.chipText} numberOfLines={1}>{shownIndex + 1} / {quiz.length}</Text>
+          </View>
+          <View style={[styles.chip, styles.chipPink]}>
+            <Text style={styles.chipText} numberOfLines={1}>{formatTime(seconds)}</Text>
+          </View>
         </View>
-        <View style={styles.resultsPanel}>
-          {quizStats.map((item, index) => (
-            <TouchableOpacity key={index} style={statsContainer(index >= positionCount ? 'orange' : item.color)} onPress={() => { revisitPosition(index); }}>
-              <Text style={{color: 'black', fontSize: 12, fontWeight: 'bold', fontFamily: 'Arial', textAlign: 'center'}}>
-                {index > positionCount ? "" : item.value}
-              </Text>
-            </TouchableOpacity>
-          ))}
+
+        {/* Results strip: tap a finished position to go back and check it */}
+        <View style={styles.tiles}>
+          {quiz.map((question, i) => {
+            const isAnswered = i < answers.length;
+            const right = isAnswered && isCorrect(answers[i], question);
+            const isShown = i === shownIndex && !isFinished;
+            const label = !isAnswered ? String(i + 1) : right ? "✓" : question.decision;
+            return (
+              <View key={i} style={[styles.tileSlot, { width: `${100 / tilesPerRow}%` }]}>
+                <TouchableOpacity
+                  disabled={!isAnswered}
+                  style={[
+                    styles.tile,
+                    { backgroundColor: !isAnswered ? 'orange' : right ? 'green' : 'red' },
+                    (isShown || i === reviewIndex) && styles.tileSelected,
+                    !isAnswered && styles.tileUnanswered,
+                  ]}
+                  onPress={() => setReviewIndex(i)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Position ${i + 1}${isAnswered ? (right ? ', correct' : ', incorrect') : ''}`}
+                >
+                  <Text style={styles.tileText} numberOfLines={1} adjustsFontSizeToFit>{label}</Text>
+                </TouchableOpacity>
+              </View>
+            );
+          })}
+        </View>
+
+        {/* Decision buttons while answering, review panel while going back */}
+        <View style={styles.main}>
+          {isReviewing ? (
+            <View style={styles.review}>
+              <View style={styles.reviewRows}>
+                {[
+                  { label: "Methods", value: `${shown.topMethod} / ${shown.bottomMethod}` },
+                  { label: "Variance", value: String(shown.varianceScore) },
+                  { label: "My guess", value: answers[reviewIndex] ?? "—" },
+                  { label: "Correct", value: shown.decision + (shown.tooGood ? " (too good)" : "") },
+                ].map((row) => (
+                  <View key={row.label} style={styles.reviewRow}>
+                    <View style={styles.reviewLabel}>
+                      <Text style={styles.reviewText} numberOfLines={1} adjustsFontSizeToFit>{row.label}</Text>
+                    </View>
+                    <View style={styles.reviewValue}>
+                      <Text style={styles.reviewText} numberOfLines={1} adjustsFontSizeToFit>{row.value}</Text>
+                    </View>
+                  </View>
+                ))}
+                <View style={styles.eqRow}>
+                  {[
+                    { key: "ND", label: "No Double", value: shown.nd },
+                    { key: "D/T", label: "Double/Take", value: shown.dt },
+                    { key: "D/P", label: "Double/Pass", value: shown.dp },
+                  ].map((cell) => (
+                    <View key={cell.key} style={[styles.eqCell, cell.key === shown.decision && styles.eqCellBest]}>
+                      <Text style={styles.eqLabel} numberOfLines={1} adjustsFontSizeToFit>{cell.label}</Text>
+                      <Text style={styles.eqValue} numberOfLines={1} adjustsFontSizeToFit>{fmtEq(cell.value)}</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+              <TouchableOpacity style={styles.button} onPress={() => (review ? navigation.goBack() : setReviewIndex(null))}
+                accessibilityRole="button" accessibilityLabel={review ? "Back to the results" : "Resume quiz"}>
+                <Text style={styles.buttonText}>{review ? 'Results' : 'Resume'}</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.decision}>
+              <View style={styles.promptRow}>
+                <Text style={styles.promptText} numberOfLines={1}>
+                  {isDouble ? "Take or pass?" : "Double or roll?"}
+                </Text>
+                {isDouble && (
+                  <TouchableOpacity onPress={() => setIsDouble(false)} hitSlop={10}
+                    accessibilityRole="button" accessibilityLabel="Undo double">
+                    <Text style={styles.backText}>← Back</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+              <TouchableOpacity
+                disabled={inputLocked}
+                style={styles.decisionButton}
+                onPress={onFirstButton}
+                accessibilityRole="button"
+              >
+                <Text style={styles.decisionText}>{isDouble ? "Take" : "Double"}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                disabled={inputLocked}
+                style={styles.decisionButton}
+                onPress={onSecondButton}
+                accessibilityRole="button"
+              >
+                <Text style={styles.decisionText}>{isDouble ? "Pass" : "Roll"}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       </View>
-      <TouchableOpacity style={[styles.pauseButton, isRewinding ? { display: 'none' } : { display: 'flex' }]} onPress={() => setIsPaused(true)}>
-        <Text style={styles.customText}>
-            { "Pause" }
-        </Text>
-      </TouchableOpacity>
-      <View style={[styles.infoScreen, isRewinding ? { display: 'none' } : { display: 'flex' }]}>
-        <View style={styles.infoSubscreenTop}>
-          <Text style={styles.infoText}> {positionCount} / {numPositions}
-          </Text>
-        </View>
-        <View style={styles.infoSubscreenMiddle}>
-          <Text style={styles.infoText}> {formatTime(seconds)}
-          </Text>
-        </View>
-      </View>
-      <TouchableOpacity style={styles.backButton} onPress={() => navigation.navigate('Home')}>
-        <Text style={styles.homeText}>
-            { "Home" }
-        </Text>
-      </TouchableOpacity>
-      <TouchableOpacity style={styles.copyButton} onPress={() => copyPosition()}>
-        <Text style={styles.homeText}>
-            { "Copy" }
-        </Text>
-      </TouchableOpacity>
-      <TouchableOpacity style={[styles.resume, isPaused ? { backgroundColor: 'rgba(240, 240, 240, 1.0)' } : { backgroundColor: 'transparent', pointerEvents: 'none' }]} 
-      activeOpacity={1} onPress={() => setIsPaused(false)}>
-        <Text style={styles.resumeText}>
-            { isPaused ? "Paused" : ""}
-        </Text>
-        <Text style={styles.resumeSubText}>
-            { isPaused ? "Tap to Resume" : ""}
-        </Text>
-      </TouchableOpacity>
-      <View style={[styles.reviewPanel, isRewinding ? { display : 'flex' } : { display: 'none' }]}>
-        <View style={styles.upperReviewPanel}>
-          <Text style={styles.infoText}>
-            { isRewinding ? `Method: ${positions[quizArray[rewindPosition][0]]?.METHOD} / ${positions[quizArray[rewindPosition][1]]?.METHOD}` : ""}
-          </Text>
-        </View>
-        <View style={styles.middleReviewPanel1}>
-          <Text style={styles.infoText}>
-            { isRewinding ? `Variance Score: ${varianceScoreMap.get(positions[quizArray[rewindPosition][0]]?.VARIANCE) + varianceScoreMap.get(positions[quizArray[rewindPosition][1]]?.VARIANCE)}` : ""}
-          </Text>
-        </View>
-        <View style={styles.middleReviewPanel2}>
-          <Text style={styles.infoText}>
-            { isRewinding ? "My guess: " + answerArray[rewindPosition] : ""}
-          </Text>
-        </View>
-        <View style={styles.lowerReviewPanel}>
-          <Text style={styles.infoText}>
-            { isRewinding ? "Correct: " + quizArray[rewindPosition][2] : ""}
-          </Text>
-        </View>
-      </View>
-      <TouchableOpacity style={[styles.resumeButton, isRewinding ? { display: 'flex' } : { display: 'none' }]} 
-          onPress={() => {
-            setIsRewinding(false);
-            if (randomBottomEntry) {
-              const updatedCheckersA = [...checkersA];
-              for (let i = 0; i < 6; i++) {
-                updatedCheckersA[5-i] = parseInt(randomBottomEntry.key[i], 16);
-              }
-              setCheckersA(updatedCheckersA);
-              const updatedCheckersB = [...checkersB];
-              for (let i = 0; i < 6; i++) {
-                updatedCheckersB[i+18] = parseInt(randomTopEntry.key[i], 16);
-              }
-              setCheckersB(updatedCheckersB);
-            }
-          }}>
-        <Text style={styles.resumeButtonText}>
-            { "Resume" }
-        </Text>
-      </TouchableOpacity>
+
+      <FormulaModal
+        visible={formulaOpen && !!(botExplain || topExplain || benjExplain)}
+        onClose={() => setFormulaOpen(false)}
+        sections={[{ title: 'Top', explanation: topExplain }, { title: 'Bottom', explanation: botExplain }, { title: 'Benjamin Count', explanation: benjExplain }]}
+        theme={activeTheme}
+      />
+
+      {/* Pause overlay hides the board so you can't study while the clock is stopped */}
+      {isPaused && (
+        <TouchableOpacity style={styles.pauseOverlay} activeOpacity={1} onPress={() => setIsPaused(false)}>
+          <Text style={styles.pauseTitle}>Paused</Text>
+          <Text style={styles.pauseSubtitle}>Tap to Resume</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
 
-const statsContainer = (bgColor) => ({
-  backgroundColor: bgColor,
-  padding: 5,
-  borderRadius: 5,
-  margin: 1,
-  minWidth: 30,
-  alignItems: 'center',
-});
+const stylesFunc = (height, width, theme, insets) => {
+  const gap = Math.max(0.025 * height, 8);
+  const padTop = Math.max(gap, insets.top);
+  const padBottom = Math.max(gap, insets.bottom);
+  const railWidth = Math.min(Math.max(0.21 * height, 76), 120);
+  const availableHeight = height - padTop - padBottom;
+  // The board is 1.376 wide per unit of its own height, which is 0.9 of the unit we give it
+  const boardWidth = 1.376 * 0.9 * availableHeight;
+  const buttonRadius = Math.max(0.03 * height, 8);
+  const chipHeight = Math.min(Math.max(0.085 * height, 30), 40);
+  const tileHeight = Math.min(Math.max(0.085 * height, 28), 38);
+  const smallFont = Math.min(Math.max(0.035 * height, 12), 15);
 
-const stylesFunc = (height, width, theme) => StyleSheet.create({
-  container: {
-    flex: 1,
-    gap: 20,
-    backgroundColor: theme?.backgroundColor,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  customText: {
-    color: theme?.buttonTextCol,
-    fontSize: 24,
-    fontWeight: 'bold',
-    fontFamily: 'Arial',
-  },
-  homeText: {
-    color: theme?.buttonTextCol,
-    fontSize: 10,
-    fontWeight: 'bold',
-    fontFamily: 'Arial',
-    textAlign: 'center',
-  },
-  backButton: {
-    backgroundColor: theme?.buttonCol,
-    borderRadius: 0.01 * height,
-    justifyContent: 'center',
-    alignItems: 'center',
-    position: 'absolute',
-    top: 0.08 * height,
-    left: 0.055 * height,
-    height: 0.07 * height,
-    width: 0.09 * height
-  },
-  pauseButton: {
-    backgroundColor: theme?.buttonCol,
-    borderRadius: 0.01 * height,
-    justifyContent: 'center',
-    alignItems: 'center',
-    position: 'absolute',
-    top: 0.12 * height,
-    left: 0.66 * width,
-    height: '8%',
-    width: '12%',
-  },
-  copyButton: {
-    backgroundColor: theme?.buttonCol,
-    borderRadius: 0.01 * height,
-    justifyContent: 'center',
-    alignItems: 'center',
-    position: 'absolute',
-    top: 0.20 * height,
-    left: 0.055 * height,
-    height: 0.07 * height,
-    width: 0.09 * height
-  },
-  resume: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    height: height,
-    width: width,
-    justifyContent: 'center',
-    alignContent: 'center',
-  },
-  resumeText: {
-    color: 'black',
-    fontSize: 24,
-    fontWeight: 'bold',
-    fontFamily: 'Arial',
-    textAlign: 'center',
-  },
-  resumeSubText: {
-    color: 'black',
-    fontSize: 12,
-    fontWeight: 'bold',
-    fontFamily: 'Arial',
-    textAlign: 'center',
-  },
-  decisionButtonText: {
-    color: 'black',
-    fontSize: 16,
-    fontWeight: 'bold',
-    fontFamily: 'Arial',
-    textAlign: 'center',
-  },
-  keypadWrapper: {
-    height: '30%',  // Give it a fixed height
-    width: '50%',
-    justifyContent: 'center',
-    alignSelf: 'center',
-    marginTop: 0.1 * height,
-    marginLeft: 0.25 * height,
-  },
-  infoScreen: {
-    height: '40%',
-    width: '12%',
-    position: 'absolute',
-    top: 0.22 * height,
-    left: 0.66 * width,
-    backgroundColor: 'lightgray',
-    flexDirection: 'column',
-    borderColor: 'black',
-    borderWidth: 2,
-  },
-  infoSubscreenTop: {
-    flex: 1,
-    backgroundColor: 'lightgray',
-    alignContent: 'center',
-    justifyContent: 'center',
-  },
-  infoSubscreenMiddle: {
-    flex: 1,
-    backgroundColor: 'pink',
-    alignContent: 'center',
-    justifyContent: 'center',
-  },
-  infoSubscreenBottom: {
-    flex: 1,
-    backgroundColor: 'lightgray',
-    alignContent: 'center',
-    justifyContent: 'center',
-  },
-  backgammonBoardWrapper: {
-    height: height,  // Give it a fixed height
-    width: height * 0.9, 
-    alignSelf: 'center',
-  },
-  setupPositionStyle : {
-    flex : 1,
-    flexDirection : "row",
-    justifyContent : "space-between",
-    alignItems : "center", 
-    backgroundColor : theme?.backgroundColor,
-    paddingLeft : 0.075 * height,
-  },
-  sidePanel : {
-    height : '90%',
-    width : 0.7 * height,
-    marginRight : 0.08 * height,
-    marginTop : 0.05 * height,
-    flexDirection : "column",
-    justifyContent : "space-evenly",
-    alignItems : "flex-end",
-    backgroundColor : theme?.backgroundColor,
-},
-  decisionPanel: {
-    height: '40%',
-    width: '60%',
-    marginTop: 0.05 * height,
-    backgroundColor: theme?.backgroundColor,
-    justifyContent: 'flex-end',
-    alignItems: 'center',
-    flexDirection: 'column',
-  },
-  decisionButton: {
-    backgroundColor: 'white',
-    padding: 10,
-    borderRadius: 5,
-    borderWidth: 3,
-    borderColor: 'black',
-    margin: 5,
-    width: '60%',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  resultsPanel: {
-    height: '27%',
-    width: '80%',
-    backgroundColor: theme?.resultsBorderCol,
-    marginRight: 0.03 * height,
-    marginTop: height * 0.15,
-    flexDirection: 'row',
-    flexWrap: 'wrap', // Allows items to drop to the next line
-    gap: 10, // Adds consistent spacing between rows and columns
-    justifyContent: 'center',
-    alignContent: 'center',
-    borderRadius: 10,
-  },
-  infoText: {
-    color: 'black',
-    fontSize: 12,
-    fontWeight: 'bold',
-    fontFamily: 'Arial',
-    textAlign: 'center',
-  },
-  reviewPanel: {
-    height: '36%',
-    width: '24%',
-    position: 'absolute',
-    top: '10%',
-    left: '73.5%',
-    flexDirection: 'column',
-    borderWidth: 3,
-    borderRadius: 10,
-  },
-  upperReviewPanel: {
-    flex: 1,
-    backgroundColor: 'lightgray',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderTopLeftRadius: 10,
-    borderTopRightRadius: 10,
-  },
-  middleReviewPanel1: {
-    flex: 1,
-    backgroundColor: 'pink',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  middleReviewPanel2: {
-    flex: 1,
-    backgroundColor: 'lightgray',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  lowerReviewPanel: {
-    flex: 1,
-    backgroundColor: 'pink',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderBottomLeftRadius: 10,
-    borderBottomRightRadius: 10,
-  },
-  resumeButton: {
-    backgroundColor: theme?.buttonCol,
-    padding: 10,
-    borderRadius: 5,
-    position: 'absolute',
-    height: '8%',
-    width: '12%',
-    top: '58%',
-    left: '79%',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  resumeButtonText: {
-    color: theme?.buttonTextCol,
-    fontSize: 14,
-    fontWeight: 'bold',
-    fontFamily: 'Arial',
-    textAlign: 'center',
-    textAlignVertical: 'center',
-    includeFontPadding: false,
-  },
-});
+  return StyleSheet.create({
+    screen: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'stretch',
+      backgroundColor: theme?.backgroundColor,
+      gap: gap,
+      // Keep clear of the status bar, gesture bar and any notch/cutout
+      paddingTop: padTop,
+      paddingBottom: padBottom,
+      paddingLeft: Math.max(gap, insets.left),
+      paddingRight: Math.max(gap, insets.right),
+    },
+    emptyScreen: {
+      flexDirection: 'column',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    emptyText: {
+      color: theme?.textCol,
+      fontSize: 18,
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+    },
+    emptyButton: {
+      width: railWidth * 1.6,
+    },
+
+    // rail
+    rail: {
+      width: railWidth,
+      justifyContent: 'space-between',
+      alignItems: 'stretch',
+    },
+    railGroup: {
+      gap: gap,
+    },
+    button: {
+      minHeight: Math.max(0.12 * height, 40),
+      paddingHorizontal: 6,
+      borderRadius: buttonRadius,
+      backgroundColor: theme?.buttonCol,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    buttonText: {
+      color: theme?.buttonTextCol,
+      fontSize: Math.min(Math.max(0.04 * height, 12), 16),
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+      textAlign: 'center',
+    },
+
+    // board + panel share the rest of the width
+    boardArea: {
+      width: boardWidth,
+      flexShrink: 1,
+      minWidth: 0,
+      alignItems: 'stretch',
+    },
+    panel: {
+      flex: 1,
+      minWidth: 240,
+      gap: gap,
+    },
+
+    // info strip
+    infoStrip: {
+      flexDirection: 'row',
+      gap: 6,
+    },
+    chip: {
+      flex: 1,
+      height: chipHeight,
+      borderRadius: chipHeight / 2,
+      justifyContent: 'center',
+      alignItems: 'center',
+      paddingHorizontal: 8,
+    },
+    chipGray: { backgroundColor: 'lightgray' },
+    chipPink: { backgroundColor: 'pink' },
+    chipText: {
+      color: 'black',
+      fontSize: smallFont,
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+      textAlign: 'center',
+    },
+
+    // results strip
+    tiles: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      backgroundColor: theme?.resultsBorderCol,
+      borderRadius: 10,
+      padding: 3,
+    },
+    tileSlot: {
+      padding: 2,
+    },
+    tile: {
+      height: tileHeight,
+      borderRadius: 6,
+      borderWidth: 2,
+      borderColor: 'transparent',
+      justifyContent: 'center',
+      alignItems: 'center',
+      paddingHorizontal: 2,
+    },
+    tileSelected: {
+      borderColor: 'black',
+    },
+    tileUnanswered: {
+      opacity: 0.55,
+    },
+    tileText: {
+      color: 'black',
+      fontSize: smallFont,
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+      textAlign: 'center',
+    },
+
+    // decision buttons / review area
+    main: {
+      flex: 1,
+      minHeight: 0,
+    },
+    decision: {
+      flex: 1,
+      gap: gap,
+    },
+    promptRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: 4,
+    },
+    promptText: {
+      color: theme?.textCol,
+      fontSize: Math.min(Math.max(0.04 * height, 13), 17),
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+    },
+    backText: {
+      color: theme?.textCol,
+      fontSize: Math.min(Math.max(0.038 * height, 12), 16),
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+      textDecorationLine: 'underline',
+    },
+    decisionButton: {
+      flex: 1,
+      backgroundColor: theme?.buttonCol,
+      borderRadius: Math.max(0.04 * height, 10),
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    decisionText: {
+      color: theme?.buttonTextCol,
+      fontSize: Math.min(Math.max(0.06 * height, 18), 28),
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+    },
+    review: {
+      flex: 1,
+      gap: gap,
+    },
+    reviewRows: {
+      flex: 1,
+      gap: Math.max(gap / 2, 4),
+      justifyContent: 'center',
+    },
+    reviewRow: {
+      flex: 1,
+      maxHeight: 48,
+      flexDirection: 'row',
+    },
+    reviewLabel: {
+      flex: 1,
+      backgroundColor: 'lightgray',
+      justifyContent: 'center',
+      paddingHorizontal: 10,
+      borderTopLeftRadius: 12,
+      borderBottomLeftRadius: 12,
+    },
+    reviewValue: {
+      flex: 1,
+      backgroundColor: 'pink',
+      justifyContent: 'center',
+      alignItems: 'center',
+      paddingHorizontal: 10,
+      borderTopRightRadius: 12,
+      borderBottomRightRadius: 12,
+    },
+    eqRow: {
+      flex: 1.6,
+      flexDirection: 'row',
+      gap: 4,
+    },
+    eqCell: {
+      flex: 1,
+      backgroundColor: 'lightgray',
+      borderRadius: 10,
+      borderWidth: 2,
+      borderColor: 'transparent',
+      justifyContent: 'center',
+      alignItems: 'center',
+      paddingHorizontal: 3,
+    },
+    eqCellBest: {
+      backgroundColor: '#9be39b',
+      borderColor: 'black',
+    },
+    eqLabel: {
+      color: '#333',
+      fontSize: Math.min(Math.max(0.03 * height, 10), 13),
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+    },
+    eqValue: {
+      color: 'black',
+      fontSize: Math.min(Math.max(0.04 * height, 12), 16),
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+    },
+    reviewText: {
+      color: 'black',
+      fontSize: Math.min(Math.max(0.038 * height, 12), 16),
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+    },
+
+    // pause overlay
+    pauseOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: theme?.backgroundColor,
+      justifyContent: 'center',
+      alignItems: 'center',
+      zIndex: 10,
+    },
+    pauseTitle: {
+      color: theme?.textCol,
+      fontSize: 28,
+      fontWeight: 'bold',
+      fontFamily: 'Arial',
+    },
+    pauseSubtitle: {
+      color: theme?.textCol,
+      opacity: 0.75,
+      fontSize: 14,
+      fontFamily: 'Arial',
+      marginTop: 4,
+    },
+  });
+};

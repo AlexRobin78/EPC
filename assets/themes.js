@@ -34,9 +34,27 @@ export const carnivalTheme = {
   buttonTextCol: 'white',
 };
 
-export const themes = ['Jungle', 'Carnival'];
+export const neonTheme = {
+  backgroundColor: '#1a0b2e',
+  surfaceCol: '#2b1650',
+  frameCol: '#ff2e97',
+  barCol: '#b5156b',
+  trayCol: '#3d1f6d',
+  checkerCols: ['#ffe066', '#00f5d4'],
+  checkerBorderCols: ['#1a0b2e', '#1a0b2e'],
+  pointCols: ['#ff2e97', '#8f4bff'],
+  buttonCol: '#00f5d4',
+  toggleButtonCol: '#ff2e97',
+  borderCol: '#ff2e97',
+  resultsBorderCol: '#8f4bff',
+  textCol: '#f5f0ff',
+  buttonTextCol: '#1a0b2e',
+};
+
+export const themes = ['Jungle', 'Carnival', 'Neon'];
 
 // Build and export the stable theme map
 export const themeMap = new Map();
 themeMap.set('Jungle', jungleTheme);
 themeMap.set('Carnival', carnivalTheme);
+themeMap.set('Neon', neonTheme);

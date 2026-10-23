@@ -1,48 +1,88 @@
-// Component for the Setup Position screen of the app. Takes navigation as a prop.
+// Component for the Two Player (cube decision) screen of the app. Takes navigation as a prop.
+//
+// Layout (landscape):
+//   [ action rail ] [ board (flexes, centered) ] [ stats panel ]
+// Every button lives inside the rail's normal flex flow (no absolute positioning),
+// so nothing can overlap the board or each other.
 
-import { useContext, useState } from 'react';
+import { useContext, useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GameContext } from '../app/GameContext';
 import positions from '../assets/epc_positions.json';
+import { getEPC, isTablePosition, isWithinSixPoint, positionKey } from '../assets/epcEngine';
+import { cubeDecisionForCheckers, engineSupports } from '../assets/gnubgRace';
 import { carnivalTheme, themeMap } from '../assets/themes';
 import BackgammonBoard from "../views/BackgammonBoard";
+import FormulaModal, { benjaminSection, explainChecker, FormulaButton } from '../views/FormulaModal';
+import { benjaminCount } from '../assets/epcFormulas';
+import TwoPlayerStats from '../views/TwoPlayerStats';
 
-export default function Two_Players({ navigation }) {
-  const { soloCheckersCopy, setSoloCheckersCopy, pairCheckersCopy, setPairCheckersCopy, selectedTheme } = useContext(GameContext);
-  const activeTheme = themeMap && themeMap.has(selectedTheme) 
-    ? themeMap.get(selectedTheme) 
+function getNumHomeCheckers(arr) {
+  return 15 - arr.reduce((acc, item) => acc + item, 0);
+}
+
+const noop = () => {};
+
+// Positions within the 6 point show the "Actual EPC" stored in the JSON file. Set to true to use the
+// exact table instead, which follows the same rules as the on-the-fly values (see epc_gen_fast.py).
+const USE_TABLE_FOR_ALL_EPC = false;
+
+// Everything one side's stats need. `checkers` is in standard orientation (index 0 = that player's
+// 1 point). Within the 6 point we use the JSON file; beyond it, the EPC engine computes the actual EPC
+// (the estimated EPC and variance only exist in the JSON file).
+function describeSide(checkers) {
+  if (isWithinSixPoint(checkers)) {
+    const key = positionKey(checkers);
+    const entry = positions[key];
+    if (!entry) return { key, entry: null, actual: "N/A", estimated: "N/A", variance: "N/A" };
+    return {
+      key,
+      entry,
+      actual: USE_TABLE_FOR_ALL_EPC ? getEPC(checkers).epc.toFixed(2) : entry.EPC,
+      estimated: entry.BESTIMATE,
+      variance: entry.VARIANCE,
+    };
+  }
+  const result = getEPC(checkers);
+  const actual = result ? (result.kind === 'exact' ? "" : "~") + result.epc.toFixed(2) : "N/A";
+  return { key: null, entry: null, actual, estimated: "N/A", variance: "N/A" };
+}
+
+export default function Two_Players({ navigation, route }) {
+  // Opened from a quiz review: starts with that position and offers only Back (no Home) so the quiz keeps its progress
+  const fromQuiz = !!route?.params?.fromQuiz;
+  const { pairCheckersCopy, selectedTheme } = useContext(GameContext);
+  const activeTheme = themeMap && themeMap.has(selectedTheme)
+    ? themeMap.get(selectedTheme)
     : carnivalTheme;
 
-  console.log("Hello");
-  const [checkersA, setcheckersA] = useState(
-      [0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0
-      ]
-    );
-  const [checkersB, setcheckersB] = useState(
-      [0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0
-      ]
-    );
-  const [EPCText, setEPCText] = useState("");
-  const [VarianceText, setVarianceText] = useState("");
-  const [MethodText, setMethodText] = useState("");
-  const [BestimateText, setBestimateText] = useState("");
-  const [DistributionText, setDistributionText] = useState("");
-  const [FastimateText, setFastimateText] = useState("");
+  const [checkersA, setcheckersA] = useState(route?.params?.position ? [...route.params.position[0]] : new Array(24).fill(0));
+  const [checkersB, setcheckersB] = useState(route?.params?.position ? [...route.params.position[1]] : new Array(24).fill(0));
+
+  const [topEPC, setTopEPC] = useState("");
+  const [topActEPC, setTopActEPC] = useState("");
+  const [topVar, setTopVar] = useState("");
+  const [botEPC, setBotEPC] = useState("");
+  const [botActEPC, setBotActEPC] = useState("");
+  const [botVar, setBotVar] = useState("");
+  const [cubeDec, setCubeDec] = useState("");   // Benjamin-count rule of thumb
+  const [cube, setCube] = useState(null);       // GNU Backgammon engine result (or null)
+  const [formulaOpen, setFormulaOpen] = useState(false);
+  // How each side's EPC is estimated by formula (null when none applies); shown only after pressing Formula
+  const botExplain = useMemo(() => explainChecker(checkersA), [checkersA]);
+  const topExplain = useMemo(() => explainChecker([...checkersB].reverse()), [checkersB]);
+  // Cube decision by the Benjamin Count (both sides need a Bestimate and a variance in the table)
+  const benjExplain = useMemo(() => {
+    const top = [...checkersB].reverse();
+    if (!isWithinSixPoint(checkersA) || !isWithinSixPoint(top)) return null;
+    return benjaminSection(positions[positionKey(checkersA)], positions[positionKey(top)], cube?.short)?.explanation ?? null;
+  }, [checkersA, checkersB, cube]);
 
   const pastePosition = () => {
     setcheckersA([...pairCheckersCopy[0]]);
     setcheckersB([...pairCheckersCopy[1]]);
   };
-
-  function getNumHomeCheckers(arr) {
-    return 15 - arr.reduce((acc, item) => acc + item, 0);
-  }
 
   const updateArray = (newValue, index, player) => {
     const isPlayerA = player === 'A';
@@ -52,449 +92,220 @@ export default function Two_Players({ navigation }) {
     const setOtherArray = isPlayerA ? setcheckersB : setcheckersA;
 
     const homeCheckers = getNumHomeCheckers(currentArray);
-    const checkers = currentArray[index-1];
-    console.log("home checkers", homeCheckers, "checkers", checkers, player, "player");
+    const checkers = currentArray[index - 1];
     const setVal = (newValue === 5 && checkers >= 5)
       ? Math.min(checkers + 1, checkers + homeCheckers)
-      : Math.min(newValue, checkers + homeCheckers)
-    console.log("setval", setVal, newValue);
-    const newArray = currentArray.map((value, i) => index === i+1 ? setVal : value)
-    const otherNewArray = otherArray.map((value, i) => index === i+1 ? 0 : value)
+      : Math.min(newValue, checkers + homeCheckers);
+    const newArray = currentArray.map((value, i) => index === i + 1 ? setVal : value);
+    const otherNewArray = otherArray.map((value, i) => index === i + 1 ? 0 : value);
     setArray(newArray);
     setOtherArray(otherNewArray);
-    console.log('Updated numCheckers:', currentArray, newArray);
+  };
+
+  // Swap the two sides: the bottom setup goes to the top and the top setup to the bottom
+  // (each side is stored from its own end of the board, so both arrays are reversed as they move)
+  const flipBoard = () => {
+    setcheckersA([...checkersB].reverse());
+    setcheckersB([...checkersA].reverse());
   };
 
   const resetBoard = () => {
     setcheckersA(new Array(24).fill(0));
     setcheckersB(new Array(24).fill(0));
-  }
-
-  const { height } = useWindowDimensions();
-  const styles = stylesFunc(height, activeTheme);
-
-  const GridItem = ({ label, isVariable, isVariance, value, thin, style }) => (
-  <View style={[styles.cell, thin ? styles.thinBorder : styles.defaultBorder, style]}>
-    {isVariable ? (
-      /* Apply the small style here if it's the Variance value */
-      <Text style={[styles.input, isVariance && styles.labelTextSmall]}>
-        {value}
-      </Text>
-    ) : (
-      <Text style={isVariance ? styles.labelTextSmall : styles.labelText}>
-        {label}
-      </Text>
-    )}
-  </View>
-);
-
-  const [topEPC, setTopEPC] = useState("");
-  const [topActEPC, setTopActEPC] = useState("");
-  const [topVar, setTopVar] = useState("");
-  const [botEPC, setBotEPC] = useState("");
-  const [botActEPC, setBotActEPC] = useState("");
-  const [botVar, setBotVar] = useState("");
-  const [cubeDec, setCubeDec] = useState("");
-
-  const modifyTexts = (topBoardStr, bottomBoardStr) => {
-    console.log("BOARD", positions[topBoardStr], topBoardStr, bottomBoardStr);
-    try {
-      setTopActEPC(positions[topBoardStr].EPC);
-      setTopEPC(positions[topBoardStr].BESTIMATE);
-      setTopVar(positions[topBoardStr].VARIANCE);
-    } catch (error) {
-      setTopActEPC("N/A");
-      setTopEPC("N/A");
-      setTopVar("N/A");
-      console.log("Error fetching top position data:", error, topBoardStr);
-    }
-    try {
-      setBotActEPC(positions[bottomBoardStr].EPC);
-      setBotEPC(positions[bottomBoardStr].BESTIMATE);
-      setBotVar(positions[bottomBoardStr].VARIANCE);
-    } catch (error) {
-      setBotActEPC("N/A");
-      setBotEPC("N/A");
-      setBotVar("N/A");
-      console.log("Error fetching bottom position data:", error, bottomBoardStr);
-    }
   };
 
-  // Quantify Variance
-  const varianceScoreMap = new Map();
-  varianceScoreMap.set("rollish", 0);
-  varianceScoreMap.set("low", 1);
-  varianceScoreMap.set("medium", 2);
-  varianceScoreMap.set("high", 3);
+  const { height, width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const styles = stylesFunc(height, width, activeTheme, insets);
 
-  
-
-  const getTakePoint = (EPC, varianceVal) => {
-    if (EPC === "N/A" || varianceVal === "N/A") {
-      return "N/A";
-    }
-    return EPC + 0.5 * varianceVal;
-  };
-
+  // Benjamin Count rule of thumb (see benjaminCount in epcFormulas.js, which also drives the Formula pop-up)
   const calculateDecision = (bottomBoardStr, topBoardStr) => {
-    const topPosition = positions[topBoardStr];
-    const bottomPosition = positions[bottomBoardStr];
-
-    if (!topPosition || !bottomPosition) {
-      return "N/A";
-    }
-
-    const varianceScore = varianceScoreMap.get(positions[topBoardStr].VARIANCE) + varianceScoreMap.get(positions[bottomBoardStr].VARIANCE) - 3;
-
-    const topEPC = topPosition.BESTIMATE;
-    const bottomEPC = bottomPosition.BESTIMATE;
-    const takePoint = getTakePoint(bottomEPC, varianceScore);
-
-    console.log("Top EPC:", topEPC, "Bottom EPC:", bottomEPC, "Variance Score:", varianceScore, "Take Point:", takePoint);
-
-    if (parseInt(topEPC) === -1 || parseInt(bottomEPC) === -1) {
-      return "N/A";
-    }
-
-    if (topEPC > takePoint) {
-      return "D/P";
-    } else if (topEPC + 2.25 >= bottomEPC) {
-      return "ReD/T";
-    } else if (topEPC + 3 >= bottomEPC) {
-      return "D/T";
-    } else {
-      return "ND";
-    }
+    const r = benjaminCount(positions[bottomBoardStr], positions[topBoardStr]);
+    return r ? r.decision : "N/A";
   };
 
-  // runs when the user taps on the board
-  const handleBoardTap = () => {
-      const homeCheckersA = getNumHomeCheckers(checkersA);
-      const hexNumCheckersA = checkersA.map(value => value.toString(16)).reverse();
-      const fullBoardStrA = (hexNumCheckersA.join('') + homeCheckersA.toString(16)).toUpperCase();
-      const boardStrA = fullBoardStrA.slice(-7);
+  // Keep the stats in step with the board (also after Paste and Reset). The top player's points are
+  // numbered from the other end of the array, so flip them into standard orientation first.
+  // Positions with checkers far from home can take a moment, so those are computed after a "..." frame.
+  useEffect(() => {
+    const topCheckers = [...checkersB].reverse();
 
-      const homeCheckersB = getNumHomeCheckers(checkersB);
-      const hexNumCheckersB = checkersB.map(value => value.toString(16));
-      const fullBoardStrB = (hexNumCheckersB.join('') + homeCheckersB.toString(16)).toUpperCase();
-      const boardStrB = fullBoardStrB.slice(-7);
+    if (checkersA.every((c) => c === 0) && checkersB.every((c) => c === 0)) {
+      setTopActEPC(""); setTopEPC(""); setTopVar("");
+      setBotActEPC(""); setBotEPC(""); setBotVar("");
+      setCubeDec("");
+      return;
+    }
 
-      console.log("Looking up Player A Key:", boardStrA, "EPC", positions[boardStrA] ? positions[boardStrA].EPC : "N/A");
-      console.log("Looking up Player B Key:", boardStrB, "EPC", positions[boardStrB] ? positions[boardStrB].EPC : "N/A");
-
-      // Check if these keys actually exist in your JSON
-      console.log("Does A exist?", !!positions[boardStrA]);
-      console.log("Does B exist?", !!positions[boardStrB]);
-
-      modifyTexts(boardStrA, boardStrB, true);
-      modifyTexts(boardStrB, boardStrA, false);
-      setCubeDec(calculateDecision(boardStrA, boardStrB));
+    const update = () => {
+      const bottom = describeSide(checkersA);
+      const top = describeSide(topCheckers);
+      setTopActEPC(top.actual); setTopEPC(top.estimated); setTopVar(top.variance);
+      setBotActEPC(bottom.actual); setBotEPC(bottom.estimated); setBotVar(bottom.variance);
+      setCubeDec(bottom.entry && top.entry ? calculateDecision(bottom.key, top.key) : "N/A");
     };
 
-    return (
-        <View style={styles.setupPositionStyle}>
-          <BackgammonBoard 
-            liftToTop={(newValue, i, player) => updateArray(newValue, i, player)}
-            checkersA={checkersA}
-            checkersB={checkersB}
-            onCallParentFunction={handleBoardTap}
-            isInteractive={true}/>
+    if (isTablePosition(checkersA) && isTablePosition(topCheckers)) {
+      update();
+      return;
+    }
+    if (!isTablePosition(checkersA)) { setBotActEPC("..."); setBotEPC("N/A"); setBotVar("N/A"); }
+    if (!isTablePosition(topCheckers)) { setTopActEPC("..."); setTopEPC("N/A"); setTopVar("N/A"); }
+    setCubeDec("N/A");
+    const timer = setTimeout(update, 0);
+    return () => clearTimeout(timer);
+  }, [checkersA, checkersB]);
 
-          <View style={styles.container}>
-            {/* 2x3 Grid One - Thick Blue Border */}
-            <Text style={[styles.header, { color: 'green' }]}></Text>
-            <View style={[styles.grid, styles.thickBorderTop]}>
-              {['Estimated EPC', topEPC, 'Actual EPC', topActEPC, 'Variance', topVar].map((item, i) => (
-                <GridItem 
-                  key={`grid1-${i}`} 
-                  label={item} 
-                  isVariable={i % 2 !== 0} 
-                  isVariance={i === 5 ? true : false}
-                  value={item == "-1.0" ? "N/A" : item}
-                  style={{ 
-                    width: i % 2 === 0 ? '60%' : '40%',
-                    backgroundColor: Math.floor((i + 1) / 2) % 2 === 0 ? 'lightgray' : 'pink',
-                    borderTopLeftRadius: i === 0 ? 0.01 * height : 0,
-                    borderTopRightRadius: i === 1 ? 0.01 * height : 0,
-                    borderBottomLeftRadius: i === 4 ? 0.01 * height : 0,
-                    borderBottomRightRadius: i === 5 ? 0.01 * height : 0,
-                  }}
-                />
-              ))}
-            </View>
+  // GNU Backgammon cube decision (ported engine; money game, centred cube, 2-ply) for any position with
+  // no contact left. Checkers all on the 6 point or lower use exact bear-off tables; further out it uses an
+  // approximate race model (shown with a leading ≈). The bottom player is on roll and may double.
+  // Computed after the board has painted so tapping stays responsive.
+  useEffect(() => {
+    const topCheckers = [...checkersB].reverse();
+    if (!engineSupports(checkersA, topCheckers)) {
+      setCube(null);
+      return;
+    }
+    const timer = setTimeout(() => setCube(cubeDecisionForCheckers(checkersA, topCheckers)), 0);
+    return () => clearTimeout(timer);
+  }, [checkersA, checkersB]);
 
-            {/* 2x3 Grid Two - Thick Red Border */}
-            <Text style={[styles.header, { color: 'crimson' }]}></Text>
-            <View style={[styles.grid, styles.thickBorderBottom]}>
-              {['Estimated EPC', botEPC, 'Actual EPC', botActEPC, 'Variance', botVar].map((item, i) => (
-                <GridItem 
-                  key={`grid2-${i}`} 
-                  label={item} 
-                  isVariable={i % 2 !== 0}
-                  isVariance={i === 5 ? true : false}
-                  value={item == "-1.0" ? "N/A" : item}
-                  style={{ 
-                    width: i % 2 === 0 ? '60%' : '40%',
-                    backgroundColor: Math.floor((i + 1) / 2) % 2 === 0 ? 'lightgray' : 'pink',
-                    borderTopLeftRadius: i === 0 ? 0.01 * height : 0,
-                    borderTopRightRadius: i === 1 ? 0.01 * height : 0,
-                    borderBottomLeftRadius: i === 4 ? 0.01 * height : 0,
-                    borderBottomRightRadius: i === 5 ? 0.01 * height : 0,
-                  }}
-                />
-              ))}
-            </View>
+  return (
+    <View style={styles.screen}>
+      {/* Left rail: navigation on top, board actions at the bottom */}
+      <View style={styles.rail}>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => (fromQuiz ? navigation.goBack() : navigation.navigate('Home'))}
+          accessibilityRole="button"
+          accessibilityLabel={fromQuiz ? "Back to the quiz" : "Go to home screen"}
+        >
+          <Text style={styles.buttonText} numberOfLines={1}>{fromQuiz ? 'Back' : 'Home'}</Text>
+        </TouchableOpacity>
 
-            {/* 1x2 Grid - Thin Black Border */}
-            <Text style={styles.header}></Text>
-            <View style={[styles.grid, styles.thickBlackBorder, { height: 'auto' }]}>
-              {['Money Decision', cubeDec].map((item, i) => (
-                <GridItem 
-                  key={`grid3-${i}`}
-                  label={item}
-                  isVariable={i % 2 !== 0}
-                  isVariance={i === 5 ? true : false}
-                  value={item === "N/A" ? "N/A" : item}
-                  style={{ 
-                    width: i % 2 === 0 ? '60%' : '40%',
-                    // Manually set this height to match whatever height GridItem uses in the 2x3 grids
-                    height: 40,
-                    backgroundColor: i % 2 === 0 ? 'lightgray' : 'pink',
-                    borderBottomLeftRadius: i % 2 === 0 ? 0.01 * height : 0,
-                    borderTopLeftRadius: i % 2 === 0 ? 0.01 * height : 0,
-                    borderBottomRightRadius: i % 2 !== 0 ? 0.01 * height : 0,
-                    borderTopRightRadius: i % 2 !== 0 ? 0.01 * height : 0,
-                  }}
-                />
-              ))}
-            </View>
-          </View>
-          <TouchableOpacity style={styles.backButton} onPress={() => navigation.navigate('Home')}>
-            <Text style={styles.homeText}>
-                { "Home" }
-            </Text>
+        <View style={styles.actionGroup}>
+          {(botExplain || topExplain || benjExplain) && (
+            <FormulaButton onPress={() => setFormulaOpen(true)} style={styles.button} textStyle={styles.buttonText} />
+          )}
+          <TouchableOpacity
+            style={styles.button}
+            onPress={flipBoard}
+            accessibilityRole="button"
+            accessibilityLabel="Swap the top and bottom positions"
+          >
+            <Text style={styles.buttonText} numberOfLines={1}>Flip</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.pasteButton} onPress={() => pastePosition()}>
-            <Text style={styles.homeText}>
-                { "Paste" }
-            </Text>
+          <TouchableOpacity
+            style={styles.button}
+            onPress={pastePosition}
+            accessibilityRole="button"
+            accessibilityLabel="Paste copied position"
+          >
+            <Text style={styles.buttonText} numberOfLines={1}>Paste</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.resetButton} onPress={() => resetBoard()}>
-            <Text style={styles.homeText}>
-                { "Reset" }
-            </Text>
+          <TouchableOpacity
+            style={styles.button}
+            onPress={resetBoard}
+            accessibilityRole="button"
+            accessibilityLabel="Clear the board"
+          >
+            <Text style={styles.buttonText} numberOfLines={1}>Reset</Text>
           </TouchableOpacity>
         </View>
-    )
+      </View>
+
+      {/* Board takes whatever horizontal space is left and stays centered */}
+      <View style={styles.boardArea}>
+        <BackgammonBoard
+          liftToTop={(newValue, i, player) => updateArray(newValue, i, player)}
+          checkersA={checkersA}
+          checkersB={checkersB}
+          onCallParentFunction={noop}
+          isInteractive={true}
+        />
+      </View>
+
+      {/* Stats panel */}
+      <View style={styles.sidePanel}>
+        <TwoPlayerStats
+          topEPC={topEPC}
+          topVar={topVar}
+          topActEPC={topActEPC}
+          botEPC={botEPC}
+          botVar={botVar}
+          botActEPC={botActEPC}
+          cubeDec={cubeDec}
+          cube={cube}
+          height={height - insets.top - insets.bottom}
+          theme={activeTheme}
+        />
+      </View>
+
+      <FormulaModal
+        visible={formulaOpen && !!(botExplain || topExplain || benjExplain)}
+        onClose={() => setFormulaOpen(false)}
+        sections={[{ title: 'Top', explanation: topExplain }, { title: 'Bottom', explanation: botExplain }, { title: 'Benjamin Count', explanation: benjExplain }]}
+        theme={activeTheme}
+      />
+    </View>
+  );
 }
 
-const stylesFunc = (height, theme) => StyleSheet.create({
-      container: { 
-        width: '30%',
-        height: '85%',
-        paddingRight: 30, // Added padding for status bar area
-        paddingTop: 10,
-        paddingHorizontal: 20,
-        paddingVertical: 20,
-        backgroundColor: theme?.backgroundColor,
-        alignItems: 'center',
-        justifyContent: 'center',
-      },
-      circle: {
-        width: '%100',
-        aspectRatio: 1,
-        borderRadius: '%50', // Half of the width/height
-        backgroundColor: 'blue',
-      },
-      myContainer: {
-        width: '50%',
-        height: '50%', 
-        backgroundColor: 'red',
-        alignSelf : "center"
-      },
-      statsContainer: {
-        height : 0.075 * height,
-        width : 0.6 * height,
-        backgroundColor : theme?.backgroundColor,
-        flexDirection : 'row',
-      },
-      insideStatsContainer : {
-        backgroundColor : "white",
-        flex : 1,
-      },
-      customText: {
-        color: 'white',
-        fontSize: 24,
-        fontWeight: 'bold',
-        fontFamily: 'Arial',
-        textAlign : 'center',
+const stylesFunc = (height, width, theme, insets) => {
+  // Rail width scales with screen height but is clamped so it stays tappable
+  // on small phones and doesn't balloon on tablets.
+  const railWidth = Math.min(Math.max(0.21 * height, 76), 120);
+  const gap = Math.max(0.025 * height, 8);
 
-      },
-      leftStatsContainer: {
-        flex : 1,
-        backgroundColor : "lightgray", 
-        justifyContent : 'center',
-        alignItems : 'left',
-        borderTopLeftRadius : 0.03 * height,
-        borderBottomLeftRadius : 0.03 * height,
-      },
-      leftStatsText: {
-        color: 'black',
-        fontSize: 12,
-        fontWeight: 'bold',
-        fontFamily: 'Arial',
-        paddingHorizontal : 0.02 * height,
-      },
-      rightStatsContainer: {
-        flex : 1,
-        backgroundColor : "pink",
-        justifyContent : 'center',
-        alignItems : 'center',
-        paddingHorizontal : 0.02 * height,
-        borderTopRightRadius : 0.03 * height,
-        borderBottomRightRadius : 0.03 * height,
-      },
-      rightStatsText: {
-        color: 'black',
-        fontSize: 12,
-        fontWeight: 'bold',
-        fontFamily: 'Arial',
-      },
-      setupPositionStyle : {
-        flex : 1,
-        flexDirection : "row",
-        justifyContent : "space-between",
-        alignItems : "center", 
-        backgroundColor : theme?.backgroundColor,
-        paddingLeft : 0.075 * height,
-        paddingRight : 0.075 * height,
-      },
-      sidePanel : {
-        height : height,
-        width : 0.7 * height,
-        marginRight : 0.08 * height,
-        flexDirection : "column",
-        justifyContent : "space-evenly",
-        alignItems : "center",
-        backgroundColor : theme?.backgroundColor,
+  return StyleSheet.create({
+    screen: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'stretch',
+      backgroundColor: theme?.backgroundColor,
+      // Keep clear of the status bar, gesture bar and any notch/cutout
+      paddingTop: Math.max(gap, insets.top),
+      paddingBottom: Math.max(gap, insets.bottom),
+      paddingLeft: Math.max(gap, insets.left),
+      paddingRight: Math.max(gap, insets.right),
     },
-      evalButton : {
-        height : 0.1 * height,
-        width : 0.3 * height,
-        backgroundColor : 'blue',
-        justifyContent: 'center',
-        alignItems: 'center',
-        borderRadius : 0.03 * height
-      },
-      homeText: {
-        color: theme?.buttonTextCol,
-        fontSize: 10,
-        fontWeight: 'bold',
-        fontFamily: 'Arial',
-        textAlign: 'center',
-      },
-      resetText: {
-          color: theme?.buttonTextCol,
-          fontSize: 18,
-          fontWeight: 'bold',
-          fontFamily: 'Arial',
-          borderRadius : 0.08 * height,
-      },
-      backButton: {
-        backgroundColor: theme?.buttonCol,
-        borderRadius: 0.01 * height,
-        justifyContent: 'center',
-        alignItems: 'center',
-        position: 'absolute',
-        top: 0.08 * height,
-        left: 0.055 * height,
-        height: 0.07 * height,
-        width: 0.09 * height
-      },
-      resetButton: {
-        backgroundColor: theme?.buttonCol,
-        borderRadius: 0.01 * height,
-        justifyContent: 'center',
-        alignItems: 'center',
-        position: 'absolute',
-        top: 0.32 * height,
-        left: 0.055 * height,
-        height: 0.07 * height,
-        width: 0.09 * height
-      },
-      pasteButton: {
-        backgroundColor: theme?.buttonCol,
-        borderRadius: 0.01 * height,
-        justifyContent: 'center',
-        alignItems: 'center',
-        position: 'absolute',
-        top: 0.20 * height,
-        left: 0.055 * height,
-        height: 0.07 * height,
-        width: 0.09 * height
-      },
-      header: { 
-        fontSize: 12, 
-        fontWeight: 'bold',
-        marginTop: 10,
-        marginBottom: 5,
-      },
-      grid: {
-        flexDirection: 'row',
-        flexWrap: 'wrap',
-        },
-      cell: {
-        width: '50%',
-        height: '33.33%',
-        justifyContent: 'center',
-        alignItems: 'center',
-        padding: 5,
-        overflow: 'hidden',
-      },
-      defaultBorder: { 
-        borderBottomWidth: 1, 
-        borderRightWidth: 1, 
-        borderColor: '#ccc' 
-      },
-      thinBorder: { 
-        borderBottomWidth: 1, 
-        borderRightWidth: 1, 
-        borderColor: 
-        '#000',
-        borderRadius: 0.02 * height,
-      },
-      thickBorderTop: { 
-        borderWidth: 4, 
-        borderColor: theme?.checkerCols[0],
-        height: 100,
-        borderRadius: 0.02 * height,
-      },
-      thickBorderBottom: { 
-        borderWidth: 4, 
-        borderColor: theme?.checkerCols[1],
-        height: 100,
-        borderRadius: 0.02 * height,
-      },
-      thickBlackBorder: { 
-        borderWidth: 4, 
-        borderColor: '#000' ,
-        height: 40,
-        borderRadius: 0.02 * height,
-      },
-      labelText: { 
-        fontSize: 12,
-        fontWeight: 'bold',
-        color: '#333' 
-      },
-      labelTextSmall: { 
-        fontSize: 10,
-        color: '#333' 
-      },
-      width: '100%',
-      textAlign: 'center',
-      color: 'black',
-      fontSize: 12,
+    rail: {
+      width: railWidth,
+      justifyContent: 'space-between',
+      alignItems: 'stretch',
+    },
+    actionGroup: {
+      gap: gap,
+    },
+    button: {
+      minHeight: Math.max(0.12 * height, 40),
+      paddingHorizontal: 6,
+      borderRadius: Math.max(0.03 * height, 8),
+      backgroundColor: theme?.buttonCol,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    buttonText: {
+      color: theme?.buttonTextCol,
+      fontSize: Math.min(Math.max(0.04 * height, 12), 16),
       fontWeight: 'bold',
-      paddingVertical: 0,
-      textAlignVertical: 'center',
-      });
+      fontFamily: 'Arial',
+      textAlign: 'center',
+    },
+    boardArea: {
+      flex: 1,
+      // stretch so the board can measure the full space it has and scale to fit
+      alignItems: 'stretch',
+      marginHorizontal: gap,
+      minWidth: 0,
+    },
+    sidePanel: {
+      width: 0.62 * height,
+      flexShrink: 1,
+      minWidth: 0.4 * height,
+      justifyContent: 'center',
+      alignItems: 'center',
+      backgroundColor: theme?.backgroundColor,
+    },
+  });
+};
